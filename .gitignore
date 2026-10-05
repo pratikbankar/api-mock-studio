@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.local
+.vercel
+.superpowers/
+.DS_Store
+*.log
