@@ -56,24 +56,28 @@ export function matchPath(pattern: string, path: string): Record<string, string>
   return params;
 }
 
-const literalCount = (pattern: string) => segmentsOf(pattern).filter((s) => !s.startsWith(':')).length;
+/** One character per part: 'a' for a literal, 'b' for a parameter. Sorts literal-first. */
+const shapeOf = (pattern: string) => segmentsOf(pattern).map((s) => (s.startsWith(':') ? 'b' : 'a')).join('');
+const literalCount = (shape: string) => shape.split('a').length - 1;
 
 /**
  * Chooses the endpoint for a request. When several match, the one with the most literal
- * parts wins, so `/users/me` beats `/users/:id` no matter which was created first.
+ * parts wins, so `/users/me` beats `/users/:id`; a tie goes to the one whose literal parts
+ * come first (`/a/:x` beats `/:y/b`). Creation order never matters.
  */
 export function pickEndpoint<T extends { method: string; path: string }>(
   endpoints: T[],
   method: string,
   path: string,
 ): { endpoint: T; params: Record<string, string> } | null {
-  let best: { endpoint: T; params: Record<string, string>; score: number } | null = null;
+  let best: { endpoint: T; params: Record<string, string>; shape: string } | null = null;
   for (const endpoint of endpoints) {
     if (endpoint.method.toUpperCase() !== method.toUpperCase()) continue;
     const params = matchPath(endpoint.path, path);
     if (!params) continue;
-    const score = literalCount(endpoint.path);
-    if (!best || score > best.score) best = { endpoint, params, score };
+    const shape = shapeOf(endpoint.path);
+    const better = !best || literalCount(shape) > literalCount(best.shape) || (literalCount(shape) === literalCount(best.shape) && shape < best.shape);
+    if (better) best = { endpoint, params, shape };
   }
   return best && { endpoint: best.endpoint, params: best.params };
 }

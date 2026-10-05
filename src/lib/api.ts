@@ -1,7 +1,10 @@
 import type { Method } from './helpers';
 
 export interface Workspace {
+  /** Secret edit id (also in this page's address). */
   _id: string;
+  /** Public id used in the mock base URL. */
+  mockId: string;
   name: string;
   createdAt: string;
 }

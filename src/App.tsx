@@ -53,7 +53,7 @@ export function App() {
       </main>
 
       <footer className="border-t border-line py-5 text-center text-sm text-muted">
-        Built by <a href="https://pratik-bankar-portfolio.vercel.app" className="underline hover:text-accent">Pratik Bankar</a>. Mock responses are for testing only.
+        Built by <a href="https://pratik-bankar-portfolio.vercel.app" rel="noreferrer" className="underline hover:text-accent">Pratik Bankar</a>. Mock responses are for testing only.
       </footer>
     </div>
   );

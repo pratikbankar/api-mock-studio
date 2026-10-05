@@ -29,7 +29,7 @@ frontend before the real backend exists.
   matched, and what was returned.
 - **Try it and copy it.** Send a test request from the page, and copy a ready `curl` or
   `fetch` snippet.
-- **No sign-up.** A workspace is private to its link.
+- **No sign-up.** The workspace page's address is the key to editing it; the mock base URL is separate and safe to share.
 
 ## Example
 
@@ -114,14 +114,22 @@ Errors always look like `{ "error": { "code": "...", "message": "..." } }`.
 
 - **Mock responses are always JSON**, sent with `nosniff`, so the service cannot be used to
   host web pages or scripts.
-- **A workspace link is its only credential.** The id is 128 random bits. Anyone with the link
-  can edit the workspace, like a shared document link, and the app says so.
-- **Limits:** 20 endpoints per workspace, 20 KB per response body, delays up to 5 seconds,
-  the latest 50 log entries per workspace.
-- **Automatic cleanup:** workspaces unused for 30 days and log entries older than 7 days are
-  removed by MongoDB TTL indexes.
-- **Rate limits are best effort.** They are counted in memory per server instance, which is
-  approximate on serverless hosting.
+- **Two ids per workspace.** The page address holds a secret edit id (128 random bits); the
+  mock base URL holds a different, public id. Sharing the base URL in code or with a teammate
+  never gives away the ability to edit.
+- **Templating runs in linear time** with plain index scans, and a filled-in response is
+  capped at 256 KB, so neither a crafted body nor a large request can stall or bloat a reply.
+- **Limits:** 20 endpoints per workspace (enforced atomically), 20 KB per stored response
+  body, 32 levels of nesting, delays up to 5 seconds, the latest 50 log entries per workspace.
+- **Automatic cleanup:** workspaces unused for 30 days, their endpoints, and logs idle for
+  7 days are removed by MongoDB TTL indexes.
+- **Rate limits:** new workspaces are counted in the database, so that limit holds across
+  server instances. The per-visitor limit on mock calls is counted in memory per instance and
+  is best effort.
+- **Path matching ties:** with the same number of literal parts, the pattern whose literal
+  parts come first wins (`/a/:x` over `/:y/b`).
+- **Known platform behaviour:** Vercel rejects an address with malformed percent-encoding
+  before it reaches the app.
 
 ## License
 

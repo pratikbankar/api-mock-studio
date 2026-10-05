@@ -68,6 +68,12 @@ describe('pickEndpoint', () => {
     expect(pickEndpoint(list, 'post', '/users')?.endpoint.path).toBe('/users');
   });
 
+  it('breaks a tie by the earliest literal part, whatever the order', () => {
+    const tied = [{ method: 'GET', path: '/:y/b' }, { method: 'GET', path: '/a/:x' }];
+    expect(pickEndpoint(tied, 'GET', '/a/b')?.endpoint.path).toBe('/a/:x');
+    expect(pickEndpoint([...tied].reverse(), 'GET', '/a/b')?.endpoint.path).toBe('/a/:x');
+  });
+
   it('returns nothing when no endpoint matches', () => {
     expect(pickEndpoint(list, 'GET', '/a/b/c')).toBeNull();
     expect(pickEndpoint([], 'GET', '/')).toBeNull();
@@ -93,6 +99,21 @@ describe('validateBody', () => {
 
   it('rejects a body over 20 KB', () => {
     expect(() => validateBody(JSON.stringify({ a: 'x'.repeat(21000) }))).toThrow(/20 KB/);
+  });
+
+  it('measures the limit on what is stored, so a saved body can always be saved again', () => {
+    // Small when minified, but formatting adds a line and indentation per item.
+    const wide = JSON.stringify(Array.from({ length: 3000 }, (_, i) => i));
+    expect(Buffer.byteLength(wide)).toBeLessThan(20 * 1024);
+    expect(() => validateBody(wide)).toThrow(/20 KB/);
+    const ok = validateBody(JSON.stringify(Array.from({ length: 500 }, (_, i) => i)));
+    expect(validateBody(ok)).toBe(ok);
+  });
+
+  it('rejects deeply nested JSON, which would balloon when formatted', () => {
+    expect(() => validateBody('['.repeat(2000) + ']'.repeat(2000))).toThrow(/nested/);
+    expect(() => validateBody('['.repeat(40) + ']'.repeat(40))).toThrow(/nested/);
+    expect(validateBody('['.repeat(10) + ']'.repeat(10))).toContain('[');
   });
 });
 
@@ -137,6 +158,18 @@ describe('renderTemplate', () => {
 
   it('tolerates spaces inside the braces and swapped bounds', () => {
     expect(render({ a: '{{ params.id }}', b: '{{randomInt 6 1}}' })).toEqual({ a: '42', b: 4 });
+  });
+
+  it('stays fast on a body built to make placeholder matching slow', () => {
+    const started = Date.now();
+    const nasty = ['{{' + ' '.repeat(19000), '{{'.repeat(5000), '{{ a' + ' b'.repeat(5000), '{{' + ' '.repeat(9000) + '}' + ' '.repeat(9000)];
+    for (const text of nasty) expect(renderTemplate(JSON.stringify({ v: text }), ctx)).toEqual({ v: text });
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  it('does not re-read placeholders that arrive inside a substituted value', () => {
+    const sneaky = { ...ctx, body: { name: '{{uuid}}' } };
+    expect(renderTemplate('{"a":"{{body.name}}","b":"x {{body.name}}"}', sneaky)).toEqual({ a: '{{uuid}}', b: 'x {{uuid}}' });
   });
 
   it('never reads inherited properties of the request body', () => {

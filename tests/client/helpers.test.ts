@@ -52,6 +52,10 @@ describe('snippets', () => {
     expect(snippet).toContain(`-d '{"note":"it'\\''s"}'`);
   });
 
+  it('keeps the fetch snippet valid when the path contains a quote', () => {
+    expect(fetchSnippet({ method: 'GET', url: `${url}/o'brien` })).toContain(`fetch('${url}/o\\'brien')`);
+  });
+
   it('falls back to a string body in the fetch snippet when the body is not JSON', () => {
     expect(fetchSnippet({ method: 'POST', url, body: '{oops' })).toContain("body: '{oops'");
   });

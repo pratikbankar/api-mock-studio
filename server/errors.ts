@@ -30,6 +30,13 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(413).json({ error: { code: 'payload_too_large', message: 'The request body is too large' } });
     return;
   }
+  // Errors raised by Express itself (a malformed address, an unsupported encoding) carry their
+  // own 4xx status. They are the caller's mistake, so they must not be reported as a 500.
+  const status = Number((err as { status?: number; statusCode?: number }).status ?? (err as { statusCode?: number }).statusCode);
+  if (status >= 400 && status < 500) {
+    res.status(status).json({ error: { code: 'bad_request', message: 'The request could not be understood' } });
+    return;
+  }
   if (process.env.NODE_ENV !== 'test') console.error(err);
   res.status(500).json({ error: { code: 'internal_error', message: 'Something went wrong' } });
 };

@@ -17,8 +17,8 @@ export function WorkspacePage() {
   const [logKey, setLogKey] = useState(0);
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState('');
+  const [saves, setSaves] = useState(0);
 
-  const baseUrl = `${window.location.origin}/m/${id}`;
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -54,11 +54,14 @@ export function WorkspacePage() {
   if (!data) return <p className="py-16 text-center text-muted" role="status">Loading workspace</p>;
 
   const { workspace, endpoints } = data;
+  // The base URL uses the public mock id, never this page's secret edit id.
+  const baseUrl = `${window.location.origin}/m/${workspace.mockId}`;
   const selected = selection.kind === 'edit' ? endpoints.find((e) => e._id === selection.id) ?? null : null;
 
   const onSaved = (saved: Endpoint) => {
     setData((d) => d && { ...d, endpoints: d.endpoints.some((e) => e._id === saved._id) ? d.endpoints.map((e) => (e._id === saved._id ? saved : e)) : [...d.endpoints, saved] });
     setSelection({ kind: 'edit', id: saved._id });
+    setSaves((n) => n + 1);
     setNotice('Saved. The mock answers with the new settings straight away.');
   };
   const onDeleted = (removedId: string) => {
@@ -100,7 +103,7 @@ export function WorkspacePage() {
         </div>
         <p className="mt-3 flex items-start gap-2 text-sm text-muted">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
-          Anyone with this page's link can edit this workspace, and anyone with the base URL can call it. Do not put real data in mock responses.
+          The base URL is safe to share: it can only call your mocks. This page's address is the key to editing, so share it only with people who should be able to change the workspace. Do not put real data in mock responses.
         </p>
       </div>
 
@@ -146,9 +149,10 @@ export function WorkspacePage() {
           {selection.kind === 'none' ? (
             <div className="card p-8 text-center text-muted">Select an endpoint to edit and try it, or create a new one.</div>
           ) : (
-            // Keyed so switching endpoints resets the form to that endpoint's values.
+            // Keyed so switching endpoints, or saving, resets the form to the stored values
+            // (the server tidies the path and formats the body).
             <EndpointEditor
-              key={selected?._id ?? 'new'} workspaceId={id} endpoint={selected}
+              key={`${selected?._id ?? 'new'}:${saves}`} workspaceId={id} endpoint={selected}
               onSaved={onSaved} onDeleted={onDeleted} onCancel={() => setSelection(endpoints[0] ? { kind: 'edit', id: endpoints[0]._id } : { kind: 'none' })}
             />
           )}

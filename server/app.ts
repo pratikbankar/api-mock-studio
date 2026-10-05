@@ -7,11 +7,13 @@ import { z } from 'zod';
 import { AppError, ah, errorHandler, notFound } from './errors.js';
 import { pickEndpoint, validatePattern } from './lib/paths.js';
 import { renderTemplate, validateBody } from './lib/template.js';
-import { Endpoint, isWorkspaceId, RequestLog, Workspace } from './models.js';
+import { Endpoint, isId, RateHit, RequestLog, Workspace } from './models.js';
 import { TEMPLATES } from './templates.js';
 
 const MAX_ENDPOINTS = 20;
 const MAX_LOGS = 50;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WORKSPACES_PER_HOUR = 10;
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 
 const workspaceBody = z.strictObject({ name: z.string().trim().min(1).max(60).optional(), template: z.string().optional() });
@@ -54,19 +56,79 @@ const limiter = (windowMs: number, max: number, message: string) =>
     },
   });
 
+const isRace = (err: unknown) => (err as { code?: number }).code === 11000;
+const full = () => new AppError(409, 'endpoint_limit', `A workspace can have at most ${MAX_ENDPOINTS} endpoints`);
+
+/** Endpoints carry their own expiry date; refresh it about once a day while the workspace is used. */
+async function keepEndpointsAlive(workspaceId: string, previouslyUsed: Date | undefined) {
+  if (!previouslyUsed || Date.now() - new Date(previouslyUsed).getTime() > DAY_MS) {
+    await Endpoint.updateMany({ workspaceId }, { $set: { lastUsedAt: new Date() } });
+  }
+}
+
+/** Looks a workspace up by its secret edit id and marks it as used. */
 async function findWorkspace(id: string) {
-  const workspace = isWorkspaceId(id) ? await Workspace.findById(id) : null;
+  const workspace = isId(id) ? await Workspace.findById(id) : null;
   if (!workspace) throw new AppError(404, 'not_found', 'Workspace not found');
+  const before = workspace.lastUsedAt;
+  // Workspaces created before these fields existed get them on first use.
+  if (!workspace.get('mockId')) workspace.set('mockId', undefined);
+  if (workspace.get('endpointCount') === undefined) workspace.set('endpointCount', await Endpoint.countDocuments({ workspaceId: id }));
+  workspace.lastUsedAt = new Date();
+  await workspace.save();
+  await keepEndpointsAlive(id, before);
   return workspace;
+}
+
+/** Reserves one of the workspace's endpoint slots in a single atomic step. */
+async function claimSlot(workspaceId: string) {
+  const claimed = await Workspace.findOneAndUpdate(
+    { _id: workspaceId, endpointCount: { $lt: MAX_ENDPOINTS } },
+    { $inc: { endpointCount: 1 } },
+  );
+  if (!claimed) throw full();
+}
+const releaseSlot = (workspaceId: string) => Workspace.updateOne({ _id: workspaceId, endpointCount: { $gt: 0 } }, { $inc: { endpointCount: -1 } });
+
+async function createEndpoint(workspaceId: string, fields: Record<string, unknown>) {
+  await claimSlot(workspaceId);
+  try {
+    return (await Endpoint.create({ ...fields, workspaceId })).toObject();
+  } catch (err) {
+    await releaseSlot(workspaceId);
+    throw isDuplicate(err) ? duplicate() : err;
+  }
+}
+
+/**
+ * Counts an action in the database so the limit holds across server instances, which an
+ * in-memory counter cannot do on serverless hosting.
+ */
+async function overLimit(key: string, max: number, windowMs: number): Promise<boolean> {
+  const window = Math.floor(Date.now() / windowMs);
+  const update = () =>
+    RateHit.findOneAndUpdate(
+      { _id: `${key}:${window}` },
+      { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date((window + 1) * windowMs) } },
+      { upsert: true, returnDocument: 'after' },
+    );
+  const hit = await update().catch((err) => {
+    if (!isRace(err)) throw err;
+    return update(); // two first requests raced to create the counter; the second attempt finds it
+  });
+  return (hit?.count ?? 0) > max;
 }
 
 const listEndpoints = (workspaceId: string) => Endpoint.find({ workspaceId }).sort({ createdAt: 1, _id: 1 }).lean();
 
 async function addTemplate(workspaceId: string, name: string) {
   for (const t of TEMPLATES[name]) {
-    const fields = { workspaceId, method: t.method, path: t.path };
-    // Upsert, so applying a template twice (or over hand-made endpoints) never duplicates.
-    await Endpoint.updateOne(fields, { $setOnInsert: { ...fields, status: t.status, body: JSON.stringify(t.body, null, 2) } }, { upsert: true });
+    const key = { workspaceId, method: t.method, path: t.path };
+    // Skip what is already there, so applying a template twice never duplicates.
+    if (await Endpoint.exists(key)) continue;
+    await createEndpoint(workspaceId, { ...key, status: t.status, body: JSON.stringify(t.body, null, 2) }).catch((err) => {
+      if (!(err instanceof AppError && err.code === 'duplicate')) throw err;
+    });
   }
 }
 
@@ -81,6 +143,7 @@ const openCors: RequestHandler = (req, res, next) => {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] ?? 'Content-Type, Authorization',
+    'Access-Control-Expose-Headers': 'X-Mock-Endpoint, RateLimit, RateLimit-Policy',
     'Access-Control-Max-Age': '600',
     'X-Content-Type-Options': 'nosniff',
   });
@@ -115,16 +178,20 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
   const mocks = express.Router();
   mocks.use(openCors);
   mocks.use(limiter(60 * 1000, 120, 'Too many requests to this mock. Please slow down.'));
-  mocks.use(express.raw({ type: () => true, limit: '100kb' }), lenientBody);
+  mocks.use(express.raw({ type: () => true, limit: '20kb' }), lenientBody);
   mocks.use(
     ah(async (req: Request, res) => {
       const started = Date.now();
       // Parsed by hand from the raw path: Express would reject malformed percent-encoding
       // before the handler runs, and a mock should answer whatever it is sent.
-      const [, workspaceId = '', path = '/'] = /^\/([^/]*)(\/.*)?$/.exec(req.path) ?? [];
-      if (!isWorkspaceId(workspaceId) || !(await Workspace.exists({ _id: workspaceId }))) {
-        throw new AppError(404, 'unknown_workspace', 'There is no mock workspace at this address');
-      }
+      const [, mockId = '', path = '/'] = /^\/([^/]*)(\/.*)?$/.exec(req.path) ?? [];
+      // One step both finds the workspace by its public id and notes that it is in use.
+      const workspace = isId(mockId)
+        ? await Workspace.findOneAndUpdate({ mockId }, { $set: { lastUsedAt: new Date() } }, { projection: { _id: 1, lastUsedAt: 1 } }).lean()
+        : null;
+      if (!workspace) throw new AppError(404, 'unknown_workspace', 'There is no mock workspace at this address');
+      const workspaceId = workspace._id;
+      await keepEndpointsAlive(workspaceId, workspace.lastUsedAt);
 
       const endpoints = await listEndpoints(workspaceId);
       const match = pickEndpoint(endpoints, req.method, path);
@@ -145,24 +212,35 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
           status = 500;
           payload = { error: { code: 'simulated_failure', message: `Simulated failure (${endpoint.errorRate}% failure rate on this endpoint)` } };
         } else {
-          status = endpoint.status;
-          payload = renderTemplate(endpoint.body, {
-            params, query: req.query as Record<string, unknown>, body: req.body, uuid: randomUUID, now: () => new Date(), random,
-          });
+          try {
+            payload = renderTemplate(endpoint.body, {
+              params, query: req.query as Record<string, unknown>, body: req.body, uuid: randomUUID, now: () => new Date(), random,
+            });
+            status = endpoint.status;
+          } catch (err) {
+            if (!(err instanceof AppError)) throw err;
+            status = err.status;
+            payload = { error: { code: err.code, message: err.message } };
+          }
         }
       }
 
       const query = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
-      const entry = await RequestLog.create({
-        workspaceId, method: req.method, path: `${path}${query}`.slice(0, 300), endpointId: match?.endpoint._id ?? null,
-        status, durationMs: Date.now() - started,
+      const entry = {
+        _id: new mongoose.Types.ObjectId(), at: new Date(), method: req.method, path: `${path}${query}`.slice(0, 300),
+        endpointId: match?.endpoint._id ?? null, status, durationMs: Date.now() - started,
+      };
+      // Appending and trimming to the newest entries is one atomic update, so the cap holds under load.
+      const append = () =>
+        RequestLog.updateOne(
+          { _id: workspaceId },
+          { $push: { entries: { $each: [entry], $slice: -MAX_LOGS } }, $set: { updatedAt: new Date() } },
+          { upsert: true },
+        );
+      await append().catch((err) => {
+        if (!isRace(err)) throw err;
+        return append();
       });
-      // Keep only the newest entries, and note that the workspace is in use.
-      const oldest = await RequestLog.find({ workspaceId }).sort({ at: -1, _id: -1 }).skip(MAX_LOGS).limit(1).lean();
-      await Promise.all([
-        oldest[0] ? RequestLog.deleteMany({ workspaceId, at: { $lte: oldest[0].at }, _id: { $ne: entry._id } }) : null,
-        Workspace.updateOne({ _id: workspaceId }, { $set: { lastUsedAt: new Date() } }),
-      ]);
 
       res.status(status).json(payload);
     }),
@@ -172,7 +250,7 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
 
   // ---- Management API: /api/... ----------------------------------------------------------
   app.use(helmet());
-  app.use(express.json({ limit: '50kb' }));
+  app.use(express.json({ limit: '100kb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
@@ -180,8 +258,11 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
 
   app.post(
     '/api/workspaces',
-    limiter(60 * 60 * 1000, 10, 'You have created several workspaces already. Please try again later.'),
     ah(async (req, res) => {
+      const counted = process.env.NODE_ENV !== 'test' || Boolean(req.headers['x-test-ratelimit']);
+      if (counted && (await overLimit(`workspaces:${req.ip}`, WORKSPACES_PER_HOUR, 60 * 60 * 1000))) {
+        throw new AppError(429, 'rate_limited', 'You have created several workspaces already. Please try again later.');
+      }
       const body = parse(workspaceBody, req.body ?? {});
       if (body.template && !Object.hasOwn(TEMPLATES, body.template)) throw new AppError(400, 'validation_error', 'Unknown template');
       const workspace = await Workspace.create({ ...(body.name ? { name: body.name } : {}) });
@@ -194,8 +275,6 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
     '/api/workspaces/:id',
     ah(async (req, res) => {
       const workspace = await findWorkspace(req.params.id);
-      workspace.lastUsedAt = new Date();
-      await workspace.save();
       res.json({ workspace: workspace.toObject(), endpoints: await listEndpoints(workspace._id) });
     }),
   );
@@ -214,20 +293,12 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
     '/api/workspaces/:id/endpoints',
     ah(async (req, res) => {
       const workspace = await findWorkspace(req.params.id);
-      const fields = endpointFields(req.body);
-      if ((await Endpoint.countDocuments({ workspaceId: workspace._id })) >= MAX_ENDPOINTS) {
-        throw new AppError(409, 'endpoint_limit', `A workspace can have at most ${MAX_ENDPOINTS} endpoints`);
-      }
-      try {
-        res.status(201).json((await Endpoint.create({ ...fields, workspaceId: workspace._id })).toObject());
-      } catch (err) {
-        throw isDuplicate(err) ? duplicate() : err;
-      }
+      res.status(201).json(await createEndpoint(workspace._id, endpointFields(req.body)));
     }),
   );
 
   const endpointFilter = (req: Request) => {
-    if (!isWorkspaceId(req.params.id) || !mongoose.isValidObjectId(req.params.eid) || !/^[a-f0-9]{24}$/.test(req.params.eid)) {
+    if (!isId(req.params.id) || !mongoose.isValidObjectId(req.params.eid) || !/^[a-f0-9]{24}$/.test(req.params.eid)) {
       throw new AppError(404, 'not_found', 'Endpoint not found');
     }
     // Always scoped to the workspace in the URL, so one workspace can never reach into another.
@@ -254,6 +325,7 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
     ah(async (req, res) => {
       const removed = await Endpoint.findOneAndDelete(endpointFilter(req)).lean();
       if (!removed) throw new AppError(404, 'not_found', 'Endpoint not found');
+      await releaseSlot(req.params.id);
       res.json({ ok: true });
     }),
   );
@@ -262,7 +334,8 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
     '/api/workspaces/:id/logs',
     ah(async (req, res) => {
       const workspace = await findWorkspace(req.params.id);
-      res.json(await RequestLog.find({ workspaceId: workspace._id }).sort({ at: -1, _id: -1 }).limit(MAX_LOGS).lean());
+      const log = await RequestLog.findById(workspace._id).lean();
+      res.json([...(log?.entries ?? [])].reverse());
     }),
   );
 
@@ -270,7 +343,7 @@ export function createApp({ random = Math.random, sleep = (ms) => new Promise((r
     '/api/workspaces/:id/logs',
     ah(async (req, res) => {
       const workspace = await findWorkspace(req.params.id);
-      await RequestLog.deleteMany({ workspaceId: workspace._id });
+      await RequestLog.deleteOne({ _id: workspace._id });
       res.json({ ok: true });
     }),
   );

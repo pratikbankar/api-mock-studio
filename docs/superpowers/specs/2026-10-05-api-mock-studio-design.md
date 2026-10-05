@@ -16,12 +16,12 @@ MongoDB (database `mocks`).
 Two URL spaces on the server:
 
 - `/api/...` manages workspaces and endpoints (used by the client).
-- `/m/:workspaceId/...` serves the mocks to anyone, with CORS open.
+- `/m/:mockId/...` serves the mocks to anyone, with CORS open.
 
 ## Data
 
-- `Workspace`: `_id` is a random 22 character id (the workspace link is the only credential),
-  name, createdAt, lastUsedAt. Deleted automatically 30 days after last use.
+- `Workspace`: `_id` is a random 22 character secret edit id; `mockId` is a separate public id
+  used in mock URLs; name, endpointCount, createdAt, lastUsedAt. Deleted automatically 30 days after last use.
 - `Endpoint`: workspaceId, method (GET, POST, PUT, PATCH, DELETE), path pattern, status,
   body (JSON text, at most 20 KB), delayMs (0 to 5000), errorRate (0 to 100), order.
   Unique per workspace, method and path. At most 20 per workspace.

@@ -32,6 +32,8 @@ interface SnippetInput {
 const hasBody = ({ method, body }: SnippetInput) => Boolean(body?.trim()) && method !== 'GET' && method !== 'DELETE';
 /** Single-quote a value for a POSIX shell. */
 const sh = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+/** Single-quote a value as a JavaScript string. */
+const js = (value: string) => `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
 export function curlSnippet(input: SnippetInput): string {
   const lines = [`curl${input.method === 'GET' ? '' : ` -X ${input.method}`} ${sh(input.url)}`];
@@ -43,11 +45,11 @@ export function fetchSnippet(input: SnippetInput): string {
   const tail = '\nconst data = await res.json();';
   if (!hasBody(input)) {
     const options = input.method === 'GET' ? '' : `, { method: '${input.method}' }`;
-    return `const res = await fetch('${input.url}'${options});${tail}`;
+    return `const res = await fetch(${js(input.url)}${options});${tail}`;
   }
   const raw = input.body!.trim();
-  const body = jsonProblem(raw) ? `'${raw.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'` : `JSON.stringify(${raw})`;
-  return `const res = await fetch('${input.url}', {\n  method: '${input.method}',\n  headers: { 'Content-Type': 'application/json' },\n  body: ${body},\n});${tail}`;
+  const body = jsonProblem(raw) ? js(raw) : `JSON.stringify(${raw})`;
+  return `const res = await fetch(${js(input.url)}, {\n  method: '${input.method}',\n  headers: { 'Content-Type': 'application/json' },\n  body: ${body},\n});${tail}`;
 }
 
 export const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;

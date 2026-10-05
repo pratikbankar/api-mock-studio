@@ -70,7 +70,7 @@ export function Home() {
             {busy ? 'Creating' : 'Create workspace'}
           </button>
           <p className="mt-3 text-xs text-muted">
-            A workspace is private to its link: anyone who has the link can view and edit it. Workspaces unused for 30 days are deleted.
+            No sign-up: the workspace page's address is the key to editing it, so keep that link to yourself or your team. Workspaces unused for 30 days are deleted.
           </p>
         </form>
 
