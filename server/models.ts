@@ -12,7 +12,8 @@ const workspaceSchema = new Schema(
     /** The secret edit id: whoever has it can change the workspace. Never sent to mock callers. */
     _id: { type: String, default: newId },
     /** The public id used in mock URLs. Safe to share: it cannot open or edit the workspace. */
-    mockId: { type: String, default: newId, unique: true },
+    // Sparse: workspaces saved before this field existed have none until their first use.
+    mockId: { type: String, default: newId, index: { unique: true, sparse: true } },
     name: { type: String, default: 'My mock API' },
     /** Kept in step with the endpoints collection so the limit can be enforced atomically. */
     endpointCount: { type: Number, default: 0 },

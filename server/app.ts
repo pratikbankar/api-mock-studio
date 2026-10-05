@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { AppError, ah, errorHandler, notFound } from './errors.js';
 import { pickEndpoint, validatePattern } from './lib/paths.js';
 import { renderTemplate, validateBody } from './lib/template.js';
-import { Endpoint, isId, RateHit, RequestLog, Workspace } from './models.js';
+import { Endpoint, isId, newId, RateHit, RequestLog, Workspace } from './models.js';
 import { TEMPLATES } from './templates.js';
 
 const MAX_ENDPOINTS = 20;
@@ -72,7 +72,7 @@ async function findWorkspace(id: string) {
   if (!workspace) throw new AppError(404, 'not_found', 'Workspace not found');
   const before = workspace.lastUsedAt;
   // Workspaces created before these fields existed get them on first use.
-  if (!workspace.get('mockId')) workspace.set('mockId', undefined);
+  if (!workspace.get('mockId')) workspace.set('mockId', newId());
   if (workspace.get('endpointCount') === undefined) workspace.set('endpointCount', await Endpoint.countDocuments({ workspaceId: id }));
   workspace.lastUsedAt = new Date();
   await workspace.save();

@@ -378,6 +378,25 @@ describe('request log', () => {
   });
 });
 
+describe('workspaces created before mock ids existed', () => {
+  it('can still build its indexes and gets a mock id on first use', async () => {
+    // Two old documents with no mockId: a plain unique index could not be built over these.
+    await Workspace.collection.insertMany([
+      { _id: 'oldworkspace0000000001', name: 'Old 1', lastUsedAt: new Date(), createdAt: new Date() },
+      { _id: 'oldworkspace0000000002', name: 'Old 2', lastUsedAt: new Date(), createdAt: new Date() },
+    ] as never[]);
+    await Workspace.collection.dropIndexes();
+    await expect(Workspace.createIndexes()).resolves.not.toThrow();
+
+    const res = await request(app).get('/api/workspaces/oldworkspace0000000001');
+    expect(res.status).toBe(200);
+    expect(res.body.workspace.mockId).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(res.body.workspace.endpointCount).toBe(0);
+    expect((await addEndpoint('oldworkspace0000000001', users)).status).toBe(201);
+    expect((await request(app).get(`/m/${res.body.workspace.mockId}/users/3`)).body.id).toBe('3');
+  });
+});
+
 describe('cleanup', () => {
   it('keeps the endpoints of a workspace that is in use from expiring, and lets unused ones go', async () => {
     const ws = await newWorkspace();
