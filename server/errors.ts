@@ -26,6 +26,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(400).json({ error: { code: 'bad_request', message: 'Malformed JSON body' } });
     return;
   }
+  if ((err as { type?: string }).type === 'entity.too.large') {
+    res.status(413).json({ error: { code: 'payload_too_large', message: 'The request body is too large' } });
+    return;
+  }
   if (process.env.NODE_ENV !== 'test') console.error(err);
   res.status(500).json({ error: { code: 'internal_error', message: 'Something went wrong' } });
 };
